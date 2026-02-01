@@ -1,67 +1,104 @@
-const tg = window.Telegram.WebApp;
-tg.expand();
+import express from "express";
+import fetch from "node-fetch";
+import cors from "cors";
 
-let chart;
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-async function carregar() {
-  const simbolo = document.getElementById("acao").value;
+const TIMEOUT = 8000;
+const USER_AGENT = "Mozilla/5.0";
 
-  const r = await fetch(`http://localhost:3000/historico?acao=${simbolo}`);
-  const dados = await r.json();
+// =======================
+// MIDDLEWARES
+// =======================
+app.use(cors()); // 🔥 ESSENCIAL
+app.use(express.json());
 
-  renderCards(dados.resumo);
-  renderGrafico(dados.historico, simbolo);
+// =======================
+// FUNÇÃO PRINCIPAL (Yahoo)
+// =======================
+async function pegarYahoo(simbolo) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${simbolo}?range=5d&interval=1d`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TIMEOUT);
+
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal
+    });
+
+    const json = await r.json();
+    const result = json.chart?.result?.[0];
+    if (!result) return null;
+
+    const meta = result.meta;
+    const timestamps = result.timestamp || [];
+    const closes = result.indicators.quote[0].close || [];
+
+    const historico = timestamps
+      .map((ts, i) => ({
+        data: new Date(ts * 1000).toLocaleDateString("pt-BR"),
+        preco: Number(closes[i]?.toFixed(2))
+      }))
+      .filter(p => !isNaN(p.preco));
+
+    const atual = meta.regularMarketPrice;
+    const anterior = meta.chartPreviousClose;
+
+    if (atual == null || anterior == null) return null;
+
+    const variacao = atual - anterior;
+    const variacaoPercent = anterior ? (variacao / anterior) * 100 : 0;
+
+    return {
+      resumo: {
+        simbolo,
+        preco_atual: atual,
+        preco_anterior: anterior,
+        variacao,
+        variacao_percent: variacaoPercent,
+        moeda: meta.currency || "N/A",
+        exchange: meta.exchangeName || "N/A"
+      },
+      historico
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-function renderCards(d) {
-  const cls = d.variacao >= 0 ? "pos" : "neg";
+// =======================
+// ENDPOINT HISTÓRICO
+// =======================
+app.get("/historico", async (req, res) => {
+  const { acao } = req.query;
 
-  document.getElementById("cards").innerHTML = `
-    <div class="card">
-      <strong>${d.simbolo}</strong><br>
-      Preço atual: ${d.preco_atual.toFixed(2)} ${d.moeda}<br>
-      Preço anterior: ${d.preco_anterior.toFixed(2)}<br>
-      <span class="${cls}">
-        Variação: ${d.variacao.toFixed(2)} (${d.variacao_percent.toFixed(2)}%)
-      </span>
-    </div>
-  `;
-}
+  if (!acao) {
+    return res.status(400).json({ erro: "Parâmetro 'acao' é obrigatório" });
+  }
 
-
-chart = new Chart(document.getElementById("grafico"), {
-  type: "line",
-  data: {
-    labels: historico.map(p => p.data),
-    datasets: [{
-      label: simbolo,
-      data: historico.map(p => p.preco),
-      borderWidth: 2,
-      tension: 0.4,
-      fill: true
-    }]
-  },
-  options: {
-    responsive: true,
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        callbacks: {
-          label: ctx => `R$ ${ctx.raw.toFixed(2)}`
-        }
-      }
-    },
-    scales: {
-      x: { ticks: { color: "#aaa" } },
-      y: {
-        ticks: {
-          color: "#aaa",
-          callback: v => `R$ ${v}`
-        }
-      }
+  try {
+    const dados = await pegarYahoo(acao);
+    if (!dados) {
+      return res.status(404).json({ erro: "Dados não encontrados" });
     }
+
+    res.json(dados);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: "Erro ao buscar dados" });
   }
 });
 
+// =======================
+// TESTE RÁPIDO
+// =======================
+app.get("/", (_, res) => {
+  res.send("API de ações online 🚀");
+});
 
-carregar();
+app.listen(PORT, () => {
+  console.log(`Servidor rodando na porta ${PORT}`);
+});
